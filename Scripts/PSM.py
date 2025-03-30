@@ -1,151 +1,119 @@
-import omni.kit.commands
-import omni.usd
-import omni.isaac.core.utils.stage as stage_utils
-from omni.isaac.core.articulations import ArticulationView
-from omni.isaac.core.world import World
-from pxr import UsdPhysics, PhysxSchema, Gf, UsdGeom
-import carb
+import argparse
+from omni.isaac.lab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="idk man last choice")
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import torch
+import omni.isaac.core.utils.prims as prim_utils
+import omni.replicator.core as rep
+
+import omni.isaac.lab.sim as sim_utils
+from omni.isaac.lab.assets import Articulation
+from omni.isaac.lab.sim import SimulationContext
+from omni.isaac.lab.sensors import TiledCameraCfg, TiledCamera
+from omni.isaac.lab.utils import convert_dict_to_backend
+
+from orbit.surgical.assets.psm import PSM_HIGH_PD_CFG
+
+from scipy.spatial.transform import Rotation as R
 
 
+def design_scene() -> dict:
+    cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
+    cfg.func("/World/Lights", cfg)
 
-class PSMRobot:
-    def __init__(self, usd_path: str, pos: tuple = (0, 0, 0), psm_path: str = "/World/PSM", high_pd: bool = False):
-        '''
-            Initializes dVRK PSM
+    origins = [[0.0, 0.0, 0.0]]
+    prim_utils.create_prim("/World/Origin", "Xform", translation=origins[0])
 
-            Args:
-                usd_path (str): path to psm_col.usd file in orbit surgical
-                pos (tuple): Init position (x, y, z)
-                high_pd (bool): whether to use high PD config
-        '''
+    psm_cfg = PSM_HIGH_PD_CFG.copy()
+    psm_cfg.prim_path = "/World/Origin/Robot"
+    psm = Articulation(psm_cfg)
 
-        self.usd_path = usd_path
-        self.pos = pos
-        self.high_pd = high_pd
-        self.psm_path = psm_path
+    cam: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/Camera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(-0.34585, 0.4165, -0.20154), 
+            rot=R.from_euler('xyz', [75, -180, 40], degrees=True).as_quat(), 
+            convention='world'
+        ),
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1e5)
+        ),
+        height=480,
+        width=640
+    )
 
-        self.stage = None
-        self.world = None
-        self.psm_prim = None
-        self.articulation_controller = None
+    cam = TiledCamera(cam)
+    scene_entities = {"psm": psm,
+                      "cam": cam}
+    return scene_entities, origins
 
-        self.init_joint_positions = {
-            "psm_yaw_joint": 0.01,
-            "psm_pitch_end_joint": 0.01,
-            "psm_main_insertion_joint": 0.07,
-            "psm_tool_roll_joint": 0.01,
-            "psm_tool_pitch_joint": 0.01,
-            "psm_tool_yaw_joint": 0.01,
-            "psm_tool_gripper1_joint": -0.09,
-            "psm_tool_gripper2_joint": 0.09
-        }
+def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articulation], origins: torch.Tensor):
+    robot = entities["psm"]
+    cam = entities["cam"]
+    sim_dt = sim.get_physics_dt()
+    count = 0
 
-        self.psm_actuator_config = {
-            "joint_names": [
-                "psm_yaw_joint",
-                "psm_pitch_end_joint",
-                "psm_main_insertion_joint",
-                "psm_tool_roll_joint",
-                "psm_tool_pitch_joint",
-                "psm_tool_yaw_joint"
-            ],
-            "effort_limit": 12.0,
-            "velocity_limit": 1.0,
-            "stiffness": 800.0,
-            "damping": 40.0
-        }
+    output_dir = r"/home/imad/SurgicalToolsPose/TestImages/"
+    rep_writer = rep.BasicWriter(
+        output_dir=output_dir,
+        frame_padding=0
+    )
 
-        self.psm_tool_actuator_config = {
-            "joint_names": [
-                "psm_tool_gripper1_joint",
-                "psm_tool_gripper2_joint"
-            ],
-            "effort_limit": 0.1,
-            "velocity_limit": 0.2,
-            "stiffness": 500.0,
-            "damping": 0.1
-        }
+    while simulation_app.is_running():
+        if count % 500 == 0:
+            root_state = robot.data.default_root_state.clone()
+            root_state[:, :3] += origins
+            robot.write_root_pose_to_sim(root_state[:, :7])
+            robot.write_root_velocity_to_sim(root_state[:, 7:])
+            joint_pos, joint_vel = robot.data.default_joint_pos.clone(), robot.data.default_joint_vel.clone()
+            joint_pos += torch.rand_like(joint_pos) * 0.1
+            robot.write_joint_state_to_sim(joint_pos, joint_vel)
+            robot.reset()
 
-
-        if self.high_pd:
-            self.psm_actuator_config["stiffness"] = 800.0
-            self.psm_actuator_config["damping"] = 40.0
         
-    def setup(self):
-        self.stage = omni.usd.get_context().get_stage()
-        if not self.stage:
-            self.stage = stage_utils.create_new_stage()
+            print(f"image shape: {cam.data.output['rgb'].shape}")
+            single_cam_data = convert_dict_to_backend(
+                {k: v for k, v in cam.data.output.items()}, backend="numpy"
+            )
+            single_cam_info = cam.data.info
 
-        _ = omni.kit.commands.execute(
-            "CreateReferenceCommand",
-            path_to=self.psm_path,
-            asset_path=self.usd_path,
-            usd_context=omni.usd.get_context()
-        )
-
-        self.psm_prim = self.stage.GetPrimAtPath(self.psm_path)
-        if not self.psm_prim:
-            raise Exception(f"Failed to load PSM Prim at path: {self.psm_path}")
-        
-        if not self.psm_prim.HasAttribute("xformOp:translate"):
-            UsdGeom.Xformable(self.psm_prim).AddTranslateOp()
-        self.psm_prim.GetAttribute("xformOp:translate").Set(self.pos)
-
-        self._configure_physics()
-        self._configure_joints()
-
-    def _configure_joints(self):
-        for joint_name in self.psm_actuator_config["joint_names"]:
-            joint_path = f"{self.psm_path}/{joint_name}"
-            joint_prim = self.stage.GetPrimAtPath(joint_path)
-            if joint_prim:
-                drive_api = UsdPhysics.DriveAPI.Apply(joint_prim, "angular")
-                drive_api.CreateTypeAttr().Set("force")
-                drive_api.CreateDampingAttr().Set(self.psm_actuator_config["damping"])
-                drive_api.CreateStiffnessAttr().Set(self.psm_actuator_config["stiffness"])
-                drive_api.CreateMaxForceAttr().Set(self.psm_actuator_config["effort_limit"])
-
-        for joint_name in self.psm_tool_actuator_config["joint_names"]:
-            joint_path = f"{self.psm_path}/{joint_name}"
-            joint_prim = self.stage.GetPrimAtPath(joint_path)
-            if joint_prim:
-                drive_api = UsdPhysics.DriveAPI.Apply(joint_prim, "angular")
-                drive_api.CreateTypeAttr().Set("force")
-                drive_api.CreateDampingAttr().Set(self.psm_actuator_config["damping"])
-                drive_api.CreateStiffnessAttr().Set(self.psm_actuator_config["stiffness"])
-                drive_api.CreateMaxForceAttr().Set(self.psm_actuator_config["effort_limit"])
+            rep_output = {"annotators": {}}
+            for key, data, info in zip(single_cam_data.keys(), single_cam_data.values(), single_cam_info.values()):
+                if info is not None:
+                    rep_output["annotators"][key] = {"render_product": {"data": data, **info}}
+                else:
+                    rep_output["annotators"][key] = {"render_product": {"data": data}}
+            rep_output["trigger_outputs"] = {"on_time": cam.frame}
+            rep_writer.write(rep_output)
 
 
-    def _configure_physics(self):
-        physx_articulation_api = PhysxSchema.PhysxArticulationAPI.Apply(self.psm_prim)
-        physx_articulation_api.CreateEnabledSelfCollisionsAttr().Set(False)
-        physx_articulation_api.CreateSolverPositionIterationCountAttr().Set(4)
-        physx_articulation_api.CreateSolverVelocityIterationCountAttr().Set(0)
+        efforts = torch.randn_like(robot.data.joint_pos) * 5.0
+        robot.set_joint_effort_target(efforts)
+        robot.write_data_to_sim()
+        sim.step()
+        count += 1
+        robot.update(sim_dt)
 
-        scene_path = "/World/PhysicsScene"
-        scene_prim = self.stage.GetPrimAtPath(scene_path)
-        if not scene_prim:
-            scene_prim = self.stage.DefinePrim(scene_path)
-            physics_scene = UsdPhysics.Scene.Defien(self.stage, scene_path)
-        else:
-            physics_scene = UsdPhysics.Scene.Get(self.stage, scene_path)
+        if count == 5000:
+            break
 
-        if physics_scene:
-            physics_scene.CreateGravityDirectionAttr().Set((0, 0, -1))
+def main():
+    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
+    sim = SimulationContext(sim_cfg)
+    sim.set_camera_view([2.5, 0.0, 4.0], [0.0, 0.0, 2.0])
+    scene_entities, scene_origins = design_scene()
+    scene_origins = torch.tensor(scene_origins, device=sim.device)
+    sim.reset()
+    print("[INFO]: Setup complete...")
+    run_simulator(sim, scene_entities, scene_origins)
 
-            if self.high_pd:
-                physics_scene.CreateGravityMagnitudeAttr().Set(0.0)
-            else:
-                physics_scene.CreateGravityMagnitudeAttr().Set(9.81)
-
-        UsdPhysics.Scene.Define(self.stage, scene_path)
-
-    def setup_articulation_controller(self):
-        self.world = World.instance()
-        if not self.world:
-            self.world = World()
-
-        self.articulation_view = ArticulationView(prim_paths_expr=self.psm_prim, name="psm_view")
-        self.world.scene.add(self.articulation_view)
-
-        self.articulation_controller = self.articulation_view.get_articul
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
