@@ -13,8 +13,8 @@ import ctypes
 from contextlib import contextmanager
 
 parser = argparse.ArgumentParser(description='RC Visard Python Wrapper')
-parser.add_argument('device_id', default= '07129312', help='Device ID of the RC Visard')
-parser.add_argument('--executable', default='Scripts/stereo_cam/rc_visard_show_streams', help='Path to the RC Visard executable')
+parser.add_argument('device_id', default= '00000', help='Device ID of the RC Visard')
+parser.add_argument('--executable', default='./', help='Path to the RC Visard executable')
 parser.add_argument('--left', action='store_true', help='Enable left camera stream')
 parser.add_argument('--right', action='store_true', help='Enable right camera stream')
 parser.add_argument('--disparity', action='store_true', help='Enable disparity stream')

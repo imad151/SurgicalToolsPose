@@ -4,7 +4,7 @@ from wrapper import RCVisardPython
 
 printed = False
 with RCVisardPython(
-    device_id="07129312",
+    device_id="000000",
     left=True,
     right=True,
     disparity=True,
