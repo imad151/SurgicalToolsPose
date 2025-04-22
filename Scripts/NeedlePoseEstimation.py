@@ -24,11 +24,11 @@ class EllipsePoseEstimator:
         normal = pca.components_[-1]
         return centroid, normal, pca.components_[:-1]
         
-    def project_to_plane(self, points, centroid, plane_basis):
+    def _project_to_plane(self, points, centroid, plane_basis):
         projected = (points - centroid) @ plane_basis.T
         return projected[:, 0], projected[:, 1]
         
-    def ellipse_residuals(self, params, u, v):
+    def _ellipse_residuals(self, params, u, v):
         u_c, v_c, b, theta = params
         a = self.aspect_ratio * b
         cos_t, sin_t = np.cos(theta), np.sin(theta)
@@ -36,14 +36,14 @@ class EllipsePoseEstimator:
         v_rot = -(u - u_c) * sin_t + (v - v_c) * cos_t
         return (u_rot**2 / a**2 + v_rot**2 / b**2 - 1)
         
-    def fit_ellipse(self, u, v):
+    def _fit_ellipse(self, u, v):
         u_c, v_c = np.mean(u), np.mean(v)
         b_init = (np.max(v) - np.min(v)) / 2
         theta_init = 0
         params_init = [u_c, v_c, b_init, theta_init]
 
         result = least_squares(
-            self.ellipse_residuals, 
+            self._ellipse_residuals, 
             params_init, 
             args=(u, v), 
             loss='huber', 
@@ -51,7 +51,7 @@ class EllipsePoseEstimator:
         )
         return result.x
         
-    def compute_yaw_pitch_roll(self, normal, v1, v2):
+    def _compute_yaw_pitch_roll(self, normal, v1, v2):
         rot_mat = np.column_stack((v1, v2, normal))
 
         if np.linalg.det(rot_mat) < 0:
@@ -76,10 +76,10 @@ class EllipsePoseEstimator:
                 rot_mat (numpy.ndarray): rotation_mat from scipy.
         """
         centroid, normal, plane_basis = self.fit_plane_pca(points)
-        u, v = self.project_to_plane(points, centroid, plane_basis)
-        u_c, v_c, b, theta = self.fit_ellipse(u, v)
+        u, v = self._project_to_plane(points, centroid, plane_basis)
+        u_c, v_c, b, theta = self._fit_ellipse(u, v)
         ellipse_center = centroid + u_c * plane_basis[0] + v_c * plane_basis[1]
-        rot_mat = self.compute_yaw_pitch_roll(normal, plane_basis[0], plane_basis[1])
+        rot_mat = self._compute_yaw_pitch_roll(normal, plane_basis[0], plane_basis[1])
         return ellipse_center, rot_mat
 
 
@@ -104,13 +104,13 @@ def main():
     b = 2  # Semi-minor axis
     aspect_ratio = a / b
     
-    default_points = generate_test_data(a, b)
-    points = EllipseTransformer.apply_transformation(default_points, None, np.array([0, 0, 1])) 
+    default_points = generate_test_data(a, b, num_points=8)
+    points = EllipseTransformer.apply_transformation(default_points, None, np.array([0, -3, 1])) 
 
     estimator = EllipsePoseEstimator(aspect_ratio=aspect_ratio)
     pos, rot_mat = estimator.estimate_pose(points)
-    print(pos.astype(np.int16))
-    print(R.from_matrix(rot_mat).as_euler("zyx", degrees=True))
+    print(np.round(pos, 2))
+    print(np.round(R.from_matrix(rot_mat).as_euler("xyz", degrees=True), 2))
 
 
 def test_plot():
@@ -118,14 +118,13 @@ def test_plot():
     Test the ellipse pose estimator with different numbers of points
     and visualize the results and errors.
     """
-    a = 1
-    b = 2
+    a = 0.5
+    b = 1.0
     aspect_ratio = a / b
-    true_position = np.array([0, 0, 1])
+    true_position = np.array([0, 0, 5])
     true_orientation = np.array([0, 10, 90])
     true_orientation = R.from_euler('xyz', true_orientation, degrees=True).as_matrix()
-    
-    # Test with different numbers of points
+    print(np.round(true_orientation, 2))
     num_points_range = range(4, 21)
     position_errors = []
     orientation_errors = []
@@ -138,11 +137,11 @@ def test_plot():
             true_orientation, 
             true_position
         )
-        
         # Add some noise
-        noise = np.random.normal(loc=0.0, scale=0.05, size=3)
+        noise = np.random.uniform(low=-0.01, high=0.01, size=transformed_points.shape)
+        noise -= noise.mean(axis=0)
         transformed_points += noise
-
+        
         
         # Estimate pose
         estimator = EllipsePoseEstimator(aspect_ratio)
@@ -157,13 +156,13 @@ def test_plot():
         orientation_errors.append(ori_error)
 
     # ---- Plot results ----
-    # 3D visualization
     fig = plt.figure(figsize=(12, 6))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Create mesh for plane visualization
-    s, t = np.linspace(-3, 3, 10), np.linspace(-3, 3, 10)
+    s, t = np.linspace(-5, 5, 10), np.linspace(-5, 5, 10)
     S, T = np.meshgrid(s, t)
+    estimated_position = np.array([0, 0, 5])
+    print(np.round(estimated_orientation, 2))
     plane_points = (
         estimated_position[:, np.newaxis, np.newaxis] + 
         S * basis_current[0][:, np.newaxis, np.newaxis] + 
@@ -171,7 +170,7 @@ def test_plot():
     )
     X, Y, Z = plane_points
     
-    # Plot plane and vectors
+    # Plot Plane
     ax.plot_surface(X, Y, Z, alpha=0.1, color='blue', edgecolor='none', antialiased=True)
     ax.quiver(*estimated_position, *basis_current[0], label='v1', color='red')
     ax.quiver(*estimated_position, *basis_current[1], label='v2', color='green')
@@ -183,7 +182,6 @@ def test_plot():
     ax.legend()
     ax.view_init(elev=30, azim=90)
     ax.grid(False)
-    plt.show()
     
     # Error plots
     plt.figure(figsize=(12, 5))
