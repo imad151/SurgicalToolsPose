@@ -243,7 +243,7 @@ class SyntheticNeedleDataGenerator:
             self.metrics['processing_time'].append(processing_time)
             
             # Visualize
-            if visualize and (i % 5 == 0 or i == len(trajectory) - 1):
+            if visualize:
                 ax.clear()
                 
                 ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='b', s=10, label='Input Points')
@@ -254,12 +254,12 @@ class SyntheticNeedleDataGenerator:
                 # Plot estimated needle
                 self._plot_needle(ax, est_position, est_orientation, color='r', label='Estimated')
                 
-                max_range = max([
+                '''max_range = max([
                     np.max(np.abs(points[:, 0])),
                     np.max(np.abs(points[:, 1])),
                     np.max(np.abs(points[:, 2]))
-                ]) * 1.5
-                
+                ]) * 1.5'''
+                max_range = 50
                 ax.set_xlim(-max_range, max_range)
                 ax.set_ylim(-max_range, max_range)
                 ax.set_zlim(-max_range, max_range)

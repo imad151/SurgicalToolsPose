@@ -35,11 +35,11 @@ class RobustPlaneFitter:
     """
     
     def __init__(self, 
-                 max_trials: int = 1000,
-                 residual_threshold: float = 0.5,
+                 max_trials: int = 1500,
+                 residual_threshold: float = 0.7,
                  sampling: str = 'hybrid',
-                 probability_weights: Tuple[float, float] = (0.7, 0.3),
-                 temporal_persistence: int = 3):
+                 probability_weights: Tuple[float, float] = (0.6, 0.4),
+                 temporal_persistence: int = 4):
         """
         Initialize the RobustPlaneFitter.
         
@@ -371,7 +371,7 @@ class FitzgibbonEllipseFitter:
         method (str): Fitting method ('fitzgibbon', 'geometric', or 'hybrid').
     """
     
-    def __init__(self, aspect_ratio: float = 1.0, method: str = 'fitzgibbon_hybrid'):
+    def __init__(self, aspect_ratio: float = 1.0, method: str = 'hybrid'):
         """
         Initialize the ellipse fitter.
         
@@ -620,7 +620,7 @@ class FitzgibbonEllipseFitter:
                 ),
                 [geometric_params[0], geometric_params[1], geometric_params[4]],
                 loss='huber',
-                f_scale=0.1
+                f_scale=0.05
             ).x
             
             # Combine optimized and fixed parameters

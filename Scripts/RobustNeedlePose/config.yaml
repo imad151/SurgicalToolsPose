@@ -1,0 +1,42 @@
+RobustPlaneFitter:
+  max_trials: 1500
+  residual_threshold: 0.7          # Match stereo error
+  sampling: hybrid
+  probability_weights: !!python/tuple [0.6, 0.4]  # Emphasize distance, retain curvature
+  temporal_persistence: 4
+
+FitzgibbonEllipseFitter:
+  aspect_ratio: 1.0
+  method: hybrid
+
+AdaptiveKalmanFiltering:
+  dt: 0.033
+  process_noise: [0.05, 0.05, 0.05, 0.005, 0.005, 0.005, 0.2, 0.2, 0.2]
+  measurement_noise: [0.7, 0.7, 1.2, 0.05, 0.05, 0.05]
+  adaptive_factor: 1.2
+
+SyntheticNeedleSimulation:
+  needle_length: 26.0
+  needle_radius: 13.0
+  aspect_ratio: 1.0
+  noise_level: 0.5
+  outlier_ratio: 0.1
+  trajectory:
+    duration: 10.0
+    dt: 0.033
+    position_amplitude: [10.0, 8.0, 6.0]           # Smaller motions
+    position_frequency: [0.05, 0.1, 0.1]
+    position_drift: [0.1, 0.1, 0.1]
+    orientation_amplitude: [0.3, 0.2, 0.3]          # ~17° max
+    orientation_frequency: [0.05, 0.1, 0.1]
+    orientation_drift: [0.005, 0.01, 0.01]
+  visualization:
+    enabled: true
+    save_animation: false
+    frame_stride: 5
+
+surgical_constraints:
+  stereo_baseline: 5.0
+  working_distance: 100.0
+  max_translation_mm: [100, 100, 100]
+  max_rotation_deg: [360, 60, 360]
