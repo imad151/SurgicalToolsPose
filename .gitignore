@@ -1,4 +1,6 @@
 .vscode/
 TestImages/
-__pycache__/
-usd/
+**/__pycache__/
+**/usd/
+**/logs/
+*.log

@@ -1,11 +1,55 @@
-import warnings ; warnings.simplefilter("ignore")
+import warnings
+warnings.simplefilter("ignore")
+
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import time
 from typing import Tuple, List, Dict, Optional
+import yaml
+import logging
+import json
+from datetime import datetime
+import os
 
 from main import EnhancedEllipsePoseEstimator
+
+
+log_folder = "/home/imad/SurgicalToolsPose/Scripts/RobustNeedlePose/logs/"
+os.makedirs(log_folder, exist_ok=True)
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+log_file_name = f"logs_{timestamp}.log"
+log_file_path = os.path.join(log_folder, log_file_name)
+
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+logging.basicConfig(
+    filename=log_file_path,
+    level=logging.INFO,
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+def convert_to_serializable(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.generic):
+        return obj.item()
+    elif isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(i) for i in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_to_serializable(i) for i in obj)
+    else:
+        return obj
+    
+
+def load_config(config_path: str) -> dict:
+    with open(config_path, 'r') as f:
+        config = yaml.unsafe_load(f)
+    return config
 
 class SyntheticNeedleDataGenerator:
     """
@@ -26,13 +70,7 @@ class SyntheticNeedleDataGenerator:
         trajectory_params (dict): Parameters for trajectory generation.
     """
     
-    def __init__(self, 
-                 needle_length: float = 26.0,  # Standard 1-inch surgical needle
-                 needle_radius: float = 13.0,  # Half-circle needle
-                 aspect_ratio: float = 1.0,    # Circular cross-section by default
-                 noise_level: float = 0.5,     # 0.5mm noise 
-                 outlier_ratio: float = 0.1,   # 10% outliers
-                 trajectory_params: Optional[dict] = None):
+    def __init__(self, config):
         """
         Initialize the synthetic needle data generator.
         
@@ -44,21 +82,14 @@ class SyntheticNeedleDataGenerator:
             outlier_ratio: Ratio of outlier points.
             trajectory_params: Parameters for trajectory generation.
         """
-        self.needle_length = needle_length
-        self.needle_radius = needle_radius
-        self.aspect_ratio = aspect_ratio
-        self.noise_level = noise_level
-        self.outlier_ratio = outlier_ratio
+        sim_config = config['SyntheticNeedleSimulation']
         
-        # Default trajectory params
-        self.trajectory_params = trajectory_params or {
-            'position_amplitude': [20.0, 15.0, 10.0],  # mm
-            'position_frequency': [0.1, 0.15, 0.2],    # Hz
-            'orientation_amplitude': [np.pi/4, np.pi/6, np.pi/3],  # radians
-            'orientation_frequency': [0.05, 0.1, 0.15],  # Hz
-            'position_drift': [0.2, 0.3, 0.1],  # mm/s
-            'orientation_drift': [0.01, 0.02, 0.015]  # rad/s
-        }
+        self.needle_length = sim_config['needle_length']
+        self.needle_radius = sim_config['needle_radius']
+        self.aspect_ratio = sim_config['aspect_ratio']
+        self.noise_level = sim_config['noise_level']
+        self.outlier_ratio = sim_config['outlier_ratio']
+        self.trajectory_params = sim_config['trajectory']
         
         self.gt_positions = []
         self.gt_orientations = []
@@ -112,9 +143,7 @@ class SyntheticNeedleDataGenerator:
         
         return points[visible_indices]
     
-    def generate_trajectory(self, 
-                           duration: float = 10.0, 
-                           dt: float = 0.033) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+    def generate_trajectory(self) -> List[Tuple[np.ndarray, np.ndarray, float]]:
         """
         Generate a realistic needle trajectory.
         
@@ -125,6 +154,11 @@ class SyntheticNeedleDataGenerator:
         Returns:
             List of (position, orientation, timestamp) tuples.
         """
+
+        traj_params = self.trajectory_params
+        duration = traj_params['duration']
+        dt = traj_params['dt']
+
         n_frames = int(duration / dt)
         
         trajectory = []
@@ -236,6 +270,9 @@ class SyntheticNeedleDataGenerator:
                 np.clip((np.trace(est_orientation @ orientation.T) - 1) / 2, -1, 1)
             )
             orientation_error_deg = np.degrees(orientation_error_rad)
+
+            if position_error > 0.5 or orientation_error_deg > 30:
+                logging.info(f"Frame: {i} \n{json.dumps(convert_to_serializable(metrics), indent=2)}")
             
             # Store metrics
             self.metrics['position_error'].append(position_error)
@@ -404,24 +441,27 @@ class SyntheticNeedleDataGenerator:
 
 
 def main():
-    generator = SyntheticNeedleDataGenerator(
-        needle_length=26.0,  # 26mm needle (standard surgical needle)
-        needle_radius=13.0,  # Half-circle needle
-        aspect_ratio=1.0,    # Circular cross-section
-        noise_level=0.5,     # 0.5mm noise
-        outlier_ratio=0.1    # 10% outliers
-    )
+    config = load_config("/home/imad/SurgicalToolsPose/Scripts/RobustNeedlePose/config.yaml")
+    estimator_config = {
+        'aspect_ratio': config['FitzgibbonEllipseFitter']['aspect_ratio'],
+        'surgical_constraints': config['surgical_constraints'],
+        'ransac_params': config['RobustPlaneFitter'],
+        'ellipse_method': config['FitzgibbonEllipseFitter']['method'],
+        'kalman_config': config['AdaptiveKalmanFiltering']
+    }
     
+    generator = SyntheticNeedleDataGenerator(config)
+
     # Generate trajectory (10 seconds at 30Hz)
     print("Generating synthetic needle trajectory...")
-    trajectory = generator.generate_trajectory(duration=10.0, dt=0.033)
+    trajectory = generator.generate_trajectory()
     
-    # Run tracking simulation
+    vis_config = config['SyntheticNeedleSimulation']['visualization']
     print("Running tracking simulation...")
     summary = generator.run_tracking_simulation(
         trajectory=trajectory,
-        visualize=True,
-        save_animation=True
+        visualize=vis_config['enabled'],
+        save_animation=vis_config['save_animation']
     )
     
     # Print summary statistics

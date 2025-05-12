@@ -1,9 +1,9 @@
 RobustPlaneFitter:
   max_trials: 1500
-  residual_threshold: 0.7          # Match stereo error
+  residual_threshold: 0.3
   sampling: hybrid
-  probability_weights: !!python/tuple [0.6, 0.4]  # Emphasize distance, retain curvature
-  temporal_persistence: 4
+  probability_weights: !!python/tuple [0.6, 0.4]
+  temporal_persistence: 3
 
 FitzgibbonEllipseFitter:
   aspect_ratio: 1.0
@@ -24,16 +24,16 @@ SyntheticNeedleSimulation:
   trajectory:
     duration: 10.0
     dt: 0.033
-    position_amplitude: [10.0, 8.0, 6.0]           # Smaller motions
+    position_amplitude: [10.0, 8.0, 6.0] # Smaller motions
     position_frequency: [0.05, 0.1, 0.1]
     position_drift: [0.1, 0.1, 0.1]
-    orientation_amplitude: [0.3, 0.2, 0.3]          # ~17° max
+    orientation_amplitude: [0.3, 0.2, 0.3] # ~17° max
     orientation_frequency: [0.05, 0.1, 0.1]
     orientation_drift: [0.005, 0.01, 0.01]
   visualization:
     enabled: true
     save_animation: false
-    frame_stride: 5
+    frame_stride: 1
 
 surgical_constraints:
   stereo_baseline: 5.0
