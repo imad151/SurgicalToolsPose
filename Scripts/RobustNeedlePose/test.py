@@ -1,482 +1,426 @@
-import warnings
-warnings.simplefilter("ignore")
-
+import warnings ; warnings.filterwarnings("ignore")
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import time
-from typing import Tuple, List, Dict, Optional
+from scipy.spatial.transform import Rotation as R
+from matplotlib.animation import FuncAnimation
 import yaml
-import logging
-import json
-from datetime import datetime
-import os
+import time
 
 from main import EnhancedEllipsePoseEstimator
 
-
-log_folder = "/home/imad/SurgicalToolsPose/Scripts/RobustNeedlePose/logs/"
-os.makedirs(log_folder, exist_ok=True)
-timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-log_file_name = f"logs_{timestamp}.log"
-log_file_path = os.path.join(log_folder, log_file_name)
-
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
-
-logging.basicConfig(
-    filename=log_file_path,
-    level=logging.INFO,
-    filemode="a",
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-def convert_to_serializable(obj):
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, np.generic):
-        return obj.item()
-    elif isinstance(obj, dict):
-        return {k: convert_to_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_to_serializable(i) for i in obj]
-    elif isinstance(obj, tuple):
-        return tuple(convert_to_serializable(i) for i in obj)
-    else:
-        return obj
-    
-
-def load_config(config_path: str) -> dict:
-    with open(config_path, 'r') as f:
+def read_config(dir_path):
+    with open(dir_path, 'r') as f:
         config = yaml.unsafe_load(f)
     return config
 
-class SyntheticNeedleDataGenerator:
-    """
-    Generates synthetic 3D needle point clouds and visualizes tracking results.
-    
-    This class provides methods for:
-    1. Generating realistic needle point clouds with configurable noise and outliers
-    2. Creating needle trajectories with realistic surgical motion patterns
-    3. Visualizing the tracking results and comparing with ground truth
-    4. Evaluating tracking performance with quantitative metrics
-    
-    Attributes:
-        needle_length (float): Length of the needle in mm.
-        needle_radius (float): Radius of the needle in mm.
-        aspect_ratio (float): Aspect ratio of the elliptical cross-section.
-        noise_level (float): Standard deviation of Gaussian noise in mm.
-        outlier_ratio (float): Ratio of outlier points.
-        trajectory_params (dict): Parameters for trajectory generation.
-    """
-    
+class SyntheticDataGeneration:
     def __init__(self, config):
-        """
-        Initialize the synthetic needle data generator.
+        self.sim_config = config['SyntheticNeedleSimulation']
+        self.vis_config = config.get('visualization', {})
+        self.enabled_vis = self.vis_config.get('enabled', True)
+        self.save_animation = self.vis_config.get('save_animation', False)
+        self.frame_stride = self.vis_config.get('frame_stride', 1)
         
-        Args:
-            needle_length: Length of the needle in mm.
-            needle_radius: Radius of the needle in mm.
-            aspect_ratio: Aspect ratio of the elliptical cross-section.
-            noise_level: Standard deviation of Gaussian noise in mm.
-            outlier_ratio: Ratio of outlier points.
-            trajectory_params: Parameters for trajectory generation.
-        """
-        sim_config = config['SyntheticNeedleSimulation']
-        
-        self.needle_length = sim_config['needle_length']
-        self.needle_radius = sim_config['needle_radius']
-        self.aspect_ratio = sim_config['aspect_ratio']
-        self.noise_level = sim_config['noise_level']
-        self.outlier_ratio = sim_config['outlier_ratio']
-        self.trajectory_params = sim_config['trajectory']
-        
-        self.gt_positions = []
-        self.gt_orientations = []
-        self.timestamps = []
-        
-        self.est_positions = []
-        self.est_orientations = []
-        
-        self.metrics = {
-            'position_error': [],
-            'orientation_error': [],
-            'processing_time': []
-        }
-    
-    def generate_needle_points(self, 
-                              position: np.ndarray, 
-                              orientation: np.ndarray, 
-                              n_points: int = 50) -> np.ndarray:
-        """
-        Generate synthetic 3D points lying on a needle.
-        
-        Args:
-            position: 3D position of the needle center.
-            orientation: 3x3 rotation matrix defining needle orientation.
-            n_points: Number of points to generate.
-            
-        Returns:
-            3D point cloud of shape (n_points, 3).
-        """
-        theta = np.linspace(0, np.pi, n_points)
-        
-        points = np.zeros((n_points, 3))
-        points[:, 0] = self.needle_radius * np.cos(theta)
-        points[:, 2] = self.needle_radius * np.sin(theta)
-        
-        if self.aspect_ratio != 1.0:
-            points[:, 0] *= self.aspect_ratio
-        
-        points = np.dot(points, orientation.T) + position
-        
-        points += np.random.normal(0, self.noise_level, points.shape)
-        
-        n_outliers = int(n_points * self.outlier_ratio)
-        if n_outliers > 0:
-            outlier_indices = np.random.choice(n_points, n_outliers, replace=False)
-            outlier_magnitude = self.needle_radius * 0.5
-            points[outlier_indices] += np.random.uniform(-outlier_magnitude, outlier_magnitude, (n_outliers, 3))
-        
-        visible_ratio = np.random.uniform(0.7, 1.0)  # 70-100% visible
-        visible_indices = np.random.choice(n_points, int(visible_ratio * n_points), replace=False)
-        
-        return points[visible_indices]
-    
-    def generate_trajectory(self) -> List[Tuple[np.ndarray, np.ndarray, float]]:
-        """
-        Generate a realistic needle trajectory.
-        
-        Args:
-            duration: Duration of the trajectory in seconds.
-            dt: Time step in seconds.
-            
-        Returns:
-            List of (position, orientation, timestamp) tuples.
-        """
-
-        traj_params = self.trajectory_params
-        duration = traj_params['duration']
-        dt = traj_params['dt']
-
-        n_frames = int(duration / dt)
-        
-        trajectory = []
-        
-        position = np.zeros(3)
-        orientation = np.eye(3)
-        
-        t = np.arange(n_frames) * dt
-        
-        for i in range(n_frames):
-            # Position: sinusoidal motion + drift
-            pos_amp = self.trajectory_params['position_amplitude']
-            pos_freq = self.trajectory_params['position_frequency']
-            pos_drift = self.trajectory_params['position_drift']
-            
-            position = np.array([
-                pos_amp[0] * np.sin(2 * np.pi * pos_freq[0] * t[i]) + pos_drift[0] * t[i],
-                pos_amp[1] * np.cos(2 * np.pi * pos_freq[1] * t[i]) + pos_drift[1] * t[i],
-                pos_amp[2] * np.sin(2 * np.pi * pos_freq[2] * t[i]) + pos_drift[2] * t[i]
-            ])
-            
-            # Orientation: sinusoidal rotation + drift
-            ori_amp = self.trajectory_params['orientation_amplitude']
-            ori_freq = self.trajectory_params['orientation_frequency']
-            ori_drift = self.trajectory_params['orientation_drift']
-            
-            yaw = ori_amp[0] * np.sin(2 * np.pi * ori_freq[0] * t[i]) + ori_drift[0] * t[i]
-            pitch = ori_amp[1] * np.cos(2 * np.pi * ori_freq[1] * t[i]) + ori_drift[1] * t[i]
-            roll = ori_amp[2] * np.sin(2 * np.pi * ori_freq[2] * t[i]) + ori_drift[2] * t[i]
-            
-            Rz = np.array([
-                [np.cos(yaw), -np.sin(yaw), 0],
-                [np.sin(yaw), np.cos(yaw), 0],
-                [0, 0, 1]
-            ])
-            
-            Ry = np.array([
-                [np.cos(pitch), 0, np.sin(pitch)],
-                [0, 1, 0],
-                [-np.sin(pitch), 0, np.cos(pitch)]
-            ])
-            
-            Rx = np.array([
-                [1, 0, 0],
-                [0, np.cos(roll), -np.sin(roll)],
-                [0, np.sin(roll), np.cos(roll)]
-            ])
-            
-            orientation = Rz @ Ry @ Rx
-            
-            self.gt_positions.append(position.copy())
-            self.gt_orientations.append(orientation.copy())
-            self.timestamps.append(t[i])
-            
-            trajectory.append((position.copy(), orientation.copy(), t[i]))
-        
-        return trajectory
-    
-    def run_tracking_simulation(self, 
-                               trajectory: List[Tuple[np.ndarray, np.ndarray, float]], 
-                               visualize: bool = True,
-                               save_animation: bool = False) -> Dict:
-        """
-        Run a tracking simulation using the enhanced ellipse pose estimator.
-        
-        Args:
-            trajectory: List of (position, orientation, timestamp) tuples.
-            visualize: Whether to visualize the tracking results.
-            save_animation: Whether to save the animation as a video.
-            
-        Returns:
-            Dictionary of tracking performance metrics.
-        """
-        surgical_constraints = {
-            'needle_length_mm': self.needle_length,
-            'needle_radius_mm': self.needle_radius,
-            'max_translation_mm': [100, 100, 100],
-            'max_rotation_deg': [360, 60, 360],
-            'stereo_baseline': 5.0,
-            'working_distance': 100.0
-        }
-        
-        estimator = EnhancedEllipsePoseEstimator(
-            aspect_ratio=self.aspect_ratio,
-            surgical_constraints=surgical_constraints
+        self.pose_estimator = EnhancedEllipsePoseEstimator(
+            aspect_ratio=self.sim_config.get('aspect_ratio', 2.0),
+            surgical_constraints=config.get('surgical_constraints', {}),
+            ransac_params=config.get('RobustPlaneFitter', {}),
+            ellipse_method=config.get('FitzgibbonEllipseFitter', {}).get('method', 'hybrid'),
+            kalman_config=config.get('AdaptiveKalmanFiltering', {})
         )
-        
-        if visualize:
-            fig = plt.figure(figsize=(15, 10))
-            ax = fig.add_subplot(111, projection='3d')
-            plt.ion()  
-        
-        for i, (position, orientation, timestamp) in enumerate(trajectory):
-            # Generate synthetic points
-            points = self.generate_needle_points(position, orientation)
-            
-            # Estimate pose
-            start_time = time.time()
-            est_position, est_orientation, metrics = estimator.estimate_pose(points, timestamp)
-            processing_time = time.time() - start_time
-            
-            # Store results
-            self.est_positions.append(est_position)
-            self.est_orientations.append(est_orientation)
-            
-            # Compute errors
-            position_error = np.linalg.norm(est_position - position)
-            orientation_error_rad = np.arccos(
-                np.clip((np.trace(est_orientation @ orientation.T) - 1) / 2, -1, 1)
-            )
-            orientation_error_deg = np.degrees(orientation_error_rad)
 
-            if position_error > 0.5 or orientation_error_deg > 30:
-                logging.info(f"Frame: {i} \n{json.dumps(convert_to_serializable(metrics), indent=2)}")
+        self.needle_length = self.sim_config['needle_length']
+        self.needle_radius = self.sim_config['needle_radius']
+        
+        self.base_points = self.generate_points()
+
+    def generate_points(self):
+        needle_length = self.sim_config['needle_length']
+        needle_radius = self.sim_config['needle_radius']
+        aspect_ratio = self.sim_config['aspect_ratio']
+        noise_level = self.sim_config['noise_level']
+        num_points = self.sim_config['num_points']
+        outlier_ratio = self.sim_config.get('outlier_ratio', 0.0)
+
+        a = needle_length / 2
+        b = needle_radius
+
+        t = np.linspace(0, np.pi, num_points)
+        
+        x = a * np.cos(t)
+        y = b * np.sin(t)
+        z = np.zeros_like(x)
+
+        if noise_level > 0:
+            x += np.random.normal(0, noise_level, size=x.shape)
+            y += np.random.normal(0, noise_level, size=y.shape)
+            z += np.random.normal(0, noise_level, size=z.shape)
+        
+        points = np.stack((x, y, z), axis=1)
+        
+        if outlier_ratio > 0 and num_points > 0:
+            n_outliers = int(outlier_ratio * num_points)
+            if n_outliers > 0:
+                outlier_range = max(needle_length, needle_radius) * 2
+                outliers = np.random.uniform(-outlier_range, outlier_range, size=(n_outliers, 3))
+                points = np.vstack([points, outliers])
+                
+        return points
+
+    def generate_needle_arc(self, position, rotation, num_arc_points=50):
+        """Generate needle arc points based on position and orientation"""
+        a = self.needle_length / 2
+        b = self.needle_radius
+        
+        # Generate arc in local coordinate system (half ellipse)
+        t = np.linspace(0, np.pi, num_arc_points)
+        x_local = a * np.cos(t)
+        y_local = b * np.sin(t)
+        z_local = np.zeros_like(x_local)
+        
+        # Stack points
+        local_points = np.stack((x_local, y_local, z_local), axis=1)
+        
+        # Transform to world coordinates
+        world_points = (rotation @ local_points.T).T + position
+        
+        return world_points
+
+    def generate_trajectory(self, points):
+        trajectory_config = self.sim_config['trajectory']
+
+        duration = trajectory_config['duration']
+        dt = trajectory_config['dt']
+
+        pos_amp = np.array(trajectory_config['position_amplitude'])
+        pos_freq = np.array(trajectory_config['position_frequency'])
+        pos_drift = np.array(trajectory_config['position_drift'])
+        
+        orient_amp = np.array(trajectory_config.get('orientation_amplitude', [0.3, 0.2, 0.3]))
+        orient_freq = np.array(trajectory_config.get('orientation_frequency', [0.05, 0.1, 0.1]))
+        orient_drift = np.array(trajectory_config.get('orientation_drift', [0.005, 0.01, 0.01]))
+
+        times = np.arange(0, duration, dt)
+        trajectories = []
+        ground_truth_poses = []
+
+        for t in times:
+            pos = pos_amp * np.sin(2 * np.pi * pos_freq * t) + pos_drift * t
             
-            # Store metrics
-            self.metrics['position_error'].append(position_error)
-            self.metrics['orientation_error'].append(orientation_error_deg)
-            self.metrics['processing_time'].append(processing_time)
+            orient = orient_amp * np.sin(2 * np.pi * orient_freq * t) + orient_drift * t
             
-            # Visualize
-            if visualize:
-                ax.clear()
-                
-                ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='b', s=10, label='Input Points')
-                
-                # Plot ground truth needle
-                self._plot_needle(ax, position, orientation, color='g', label='Ground Truth')
-                
-                # Plot estimated needle
-                self._plot_needle(ax, est_position, est_orientation, color='r', label='Estimated')
-                
-                '''max_range = max([
-                    np.max(np.abs(points[:, 0])),
-                    np.max(np.abs(points[:, 1])),
-                    np.max(np.abs(points[:, 2]))
-                ]) * 1.5'''
-                max_range = 50
-                ax.set_xlim(-max_range, max_range)
-                ax.set_ylim(-max_range, max_range)
-                ax.set_zlim(-max_range, max_range)
-                
-                ax.set_xlabel('X (mm)')
-                ax.set_ylabel('Y (mm)')
-                ax.set_zlabel('Z (mm)')
-                ax.set_title(f'Frame {i}: Pos Error = {position_error:.2f}mm, Orient Error = {orientation_error_deg:.2f}°')
-                ax.legend()
-                
-                plt.draw()
-                plt.pause(0.001)
-                
-                if save_animation:
-                    plt.savefig(f'needle_tracking_frame_{i:04d}.png')
+            rot_matrix = R.from_euler('xyz', orient).as_matrix()
+            
+            transformed_points = (rot_matrix @ points.T).T + pos
+            
+            trajectories.append(transformed_points)
+            ground_truth_poses.append((pos, rot_matrix))
+
+        return np.array(trajectories), ground_truth_poses, times
+
+
+    def run_solver(self, trajectories, times):
+        estimated_positions = []
+        estimated_rotations = []
+        metrics_list = []
+        time_list = []
+        for i, (points, t) in enumerate(zip(trajectories, times)):
+            
+            start_time = time.time()
+            position, rotation, metrics = self.pose_estimator.estimate_pose(points, timestamp=t)
+            end_time = time.time()
+
+            time_list.append(end_time - start_time)
+            estimated_positions.append(position)
+            estimated_rotations.append(rotation)
+            metrics_list.append(metrics)
+            
+            if i % 10 == 0:
+                print(f"Processing frame {i}/{len(trajectories)}, Average Time = {sum(time_list)/len(time_list):2f}s")
         
-        if visualize:
-            plt.ioff()
-            plt.show()
+        return np.array(estimated_positions), np.array(estimated_rotations), metrics_list, time_list
+
+    def visualize_results(self, trajectories, ground_truth_poses, estimated_positions, estimated_rotations, time_list, times):
+        if not self.enabled_vis:
+            return
+            
+        fig = plt.figure(figsize=(18, 10))
         
-        summary = {
-            'mean_position_error': np.mean(self.metrics['position_error']),
-            'std_position_error': np.std(self.metrics['position_error']),
-            'max_position_error': np.max(self.metrics['position_error']),
-            'mean_orientation_error': np.mean(self.metrics['orientation_error']),
-            'std_orientation_error': np.std(self.metrics['orientation_error']),
-            'max_orientation_error': np.max(self.metrics['orientation_error']),
-            'mean_processing_time': np.mean(self.metrics['processing_time']),
-            'max_processing_time': np.max(self.metrics['processing_time'])
-        }
+        ax1 = fig.add_subplot(221)
+        ax1.set_title('Position Error (mm)')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Error (mm)')
         
-        return summary
-    
-    def _plot_needle(self, 
-                    ax, 
-                    position: np.ndarray, 
-                    orientation: np.ndarray, 
-                    color: str = 'r',
-                    label: str = 'Needle'):
-        """
-        Plot a needle as a half-circle in 3D.
-        
-        Args:
-            ax: Matplotlib 3D axis.
-            position: 3D position of the needle center.
-            orientation: 3x3 rotation matrix.
-            color: Color of the needle.
-            label: Label for the legend.
-        """
-        theta = np.linspace(0, np.pi, 100)
-        needle_points = np.zeros((100, 3))
-        needle_points[:, 0] = self.needle_radius * np.cos(theta)
-        needle_points[:, 2] = self.needle_radius * np.sin(theta)
-        
-        if self.aspect_ratio != 1.0:
-            needle_points[:, 0] *= self.aspect_ratio
-        
-        needle_3d = np.dot(needle_points, orientation.T) + position
-        
-        ax.plot(needle_3d[:, 0], needle_3d[:, 1], needle_3d[:, 2], color=color, linewidth=2, label=label)
-        
-        ax.scatter(position[0], position[1], position[2], color=color, s=50)
-        
-        axis_length = self.needle_radius * 0.5
-        for i, c in enumerate(['r', 'g', 'b']):
-            if i == 0 and color == 'r':
-                c = 'm'
-            axis = np.zeros((2, 3))
-            axis[1, i] = axis_length
-            transformed_axis = np.dot(axis, orientation.T) + position
-            ax.plot(transformed_axis[:, 0], transformed_axis[:, 1], transformed_axis[:, 2], 
-                    color=c, linewidth=1.5)
-    
-    def plot_trajectory_comparison(self):
-        """
-        Plot a comparison of ground truth and estimated trajectories.
-        """
-        gt_positions = np.array(self.gt_positions)
-        est_positions = np.array(self.est_positions)
-        timestamps = np.array(self.timestamps)
-        
-        fig = plt.figure(figsize=(15, 10))
-        
-        # Position comparison
-        ax1 = fig.add_subplot(221, projection='3d')
-        ax1.plot(gt_positions[:, 0], gt_positions[:, 1], gt_positions[:, 2], 'g-', label='Ground Truth')
-        ax1.plot(est_positions[:, 0], est_positions[:, 1], est_positions[:, 2], 'r-', label='Estimated')
-        ax1.set_xlabel('X (mm)')
-        ax1.set_ylabel('Y (mm)')
-        ax1.set_zlabel('Z (mm)')
-        ax1.set_title('3D Trajectory Comparison')
-        ax1.legend()
-        
-        # Position error over time
         ax2 = fig.add_subplot(222)
-        position_errors = [np.linalg.norm(est - gt) for est, gt in zip(est_positions, gt_positions)]
-        ax2.plot(timestamps, position_errors, 'b-')
+        ax2.set_title('Orientation Error (degrees)')
         ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('Position Error (mm)')
-        ax2.set_title('Position Error Over Time')
-        ax2.grid(True)
+        ax2.set_ylabel('Error (degrees)')
         
-        # Orientation error over time
-        ax3 = fig.add_subplot(223)
-        ax3.plot(timestamps, self.metrics['orientation_error'], 'r-')
-        ax3.set_xlabel('Time (s)')
-        ax3.set_ylabel('Orientation Error (degrees)')
-        ax3.set_title('Orientation Error Over Time')
-        ax3.grid(True)
-        
-        # Processing time
+        ax3 = fig.add_subplot(223, projection='3d')
+        ax3.set_title('Trajectory')
+        ax3.set_xlabel('X (mm)')
+        ax3.set_ylabel('Y (mm)')
+        ax3.set_zlabel('Z (mm)')
+
         ax4 = fig.add_subplot(224)
-        ax4.plot(timestamps, self.metrics['processing_time'], 'g-')
-        ax4.set_xlabel('Time (s)')
-        ax4.set_ylabel('Processing Time (s)')
-        ax4.set_title('Processing Time Per Frame')
-        ax4.grid(True)
+        ax4.set_title("Processing Time")
+        ax4.set_xlabel("Time(s)")
+        ax4.set_ylabel("Processing Time (ms)")
         
-        plt.tight_layout()
-        plt.show()
-    
-    def plot_error_histograms(self):
-        """
-        Plot histograms of position and orientation errors.
-        """
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        pos_errors = []
+        rot_errors = []
         
-        ax1.hist(self.metrics['position_error'], bins=20, color='blue', alpha=0.7)
-        ax1.set_xlabel('Position Error (mm)')
-        ax1.set_ylabel('Frequency')
-        ax1.set_title('Position Error Distribution')
+        for i, (gt_pose, est_pos, est_rot) in enumerate(zip(ground_truth_poses, estimated_positions, estimated_rotations)):
+            gt_pos, gt_rot = gt_pose
+            
+            pos_error = np.linalg.norm(gt_pos - est_pos)
+            pos_errors.append(pos_error)
+            
+            rot_error_matrix = np.abs(gt_rot - est_rot)
+            rot_error = np.rad2deg(np.linalg.norm(rot_error_matrix, 'fro') / (2 * np.sqrt(2)))
+            rot_errors.append(rot_error)
+        
+        ax1.plot(times, pos_errors)
         ax1.grid(True)
         
-        ax2.hist(self.metrics['orientation_error'], bins=20, color='red', alpha=0.7)
-        ax2.set_xlabel('Orientation Error (degrees)')
-        ax2.set_ylabel('Frequency')
-        ax2.set_title('Orientation Error Distribution')
+        ax2.plot(times, rot_errors)
         ax2.grid(True)
         
+        gt_positions = np.array([pos for pos, _ in ground_truth_poses])
+        ax3.plot(gt_positions[:, 0], gt_positions[:, 1], gt_positions[:, 2], 'b-', label='Ground Truth')
+        ax3.plot(estimated_positions[:, 0], estimated_positions[:, 1], estimated_positions[:, 2], 'r--', label='Estimated')
+        ax3.legend()
+        
+        ax4.plot(times, time_list)
+        ax4.grid(True)
+
         plt.tight_layout()
+        
+        if self.save_animation:
+            self._create_animation(trajectories, ground_truth_poses, estimated_positions, estimated_rotations)
+        
         plt.show()
+    
+    def _create_animation(self, trajectories, ground_truth_poses, estimated_positions, estimated_rotations):
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        max_range = 0
+        for points in trajectories:
+            max_val = np.max(np.abs(points))
+            if max_val > max_range:
+                max_range = max_val
+        
+        ax.set_xlim(-max_range, max_range)
+        ax.set_ylim(-max_range, max_range)
+        ax.set_zlim(-max_range, max_range)
+        ax.set_xlabel('X (mm)')
+        ax.set_ylabel('Y (mm)')
+        ax.set_zlabel('Z (mm)')
+        ax.set_title('Needle Tracking Animation')
+        
+        points_plot, = ax.plot([], [], [], 'bo', markersize=4, label='Points')
+
+        gt_center_plot, = ax.plot([], [], [], 'go', markersize=8, label='GT Center')
+        
+        est_center_plot, = ax.plot([], [], [], 'ro', markersize=8, label='Est Center')
+        
+        gt_traj_plot, = ax.plot([], [], [], 'g-', linewidth=1, label='GT Trajectory')
+        est_traj_plot, = ax.plot([], [], [], 'r-', linewidth=1, label='Est Trajectory')
+
+        # Ground truth needle arc
+        gt_needle_plot, = ax.plot([], [], [], 'g-', linewidth=3, alpha=0.7, label="GT Needle Arc")
+        
+        # Estimated needle arc
+        est_needle_plot, = ax.plot([], [], [], 'r-', linewidth=3, alpha=0.7, label="Est Needle Arc")
+        
+        frame_text = ax.text2D(0.02, 0.95, "", transform=ax.transAxes)
+        
+        axis_scale = max_range * 0.2
+        
+        gt_axes = None
+        est_axes = None
+        
+        ax.legend()
+        
+        def init():
+            points_plot.set_data([], [])
+            points_plot.set_3d_properties([])
+            
+            gt_center_plot.set_data([], [])
+            gt_center_plot.set_3d_properties([])
+            
+            est_center_plot.set_data([], [])
+            est_center_plot.set_3d_properties([])
+            
+            gt_traj_plot.set_data([], [])
+            gt_traj_plot.set_3d_properties([])
+            
+            est_traj_plot.set_data([], [])
+            est_traj_plot.set_3d_properties([])
+
+            gt_needle_plot.set_data([], [])
+            gt_needle_plot.set_3d_properties([])
+            
+            est_needle_plot.set_data([], [])
+            est_needle_plot.set_3d_properties([])
+            
+            frame_text.set_text("")
+            
+            return (points_plot, gt_center_plot, est_center_plot, gt_traj_plot, est_traj_plot, 
+                   gt_needle_plot, est_needle_plot, frame_text)
+        
+        def update(frame_idx):
+            nonlocal gt_axes, est_axes
+            
+            i = frame_idx * self.frame_stride
+            if i >= len(trajectories):
+                i = len(trajectories) - 1
+            
+            points = trajectories[i]
+            x, y, z = points[:, 0], points[:, 1], points[:, 2]
+            points_plot.set_data(x, y)
+            points_plot.set_3d_properties(z)
+            
+            gt_pos, gt_rot = ground_truth_poses[i]
+            gt_center_plot.set_data([gt_pos[0]], [gt_pos[1]])
+            gt_center_plot.set_3d_properties([gt_pos[2]])
+
+            # Generate and plot ground truth needle arc
+            gt_needle_arc = self.generate_needle_arc(gt_pos, gt_rot)
+            gt_needle_plot.set_data(gt_needle_arc[:, 0], gt_needle_arc[:, 1])
+            gt_needle_plot.set_3d_properties(gt_needle_arc[:, 2])
+            
+            if gt_axes is not None:
+                for artist in gt_axes:
+                    if artist:
+                        try:
+                            artist.remove()
+                        except:
+                            pass
+            
+            gt_x_arrow = ax.quiver(gt_pos[0], gt_pos[1], gt_pos[2], 
+                                  gt_rot[0, 0]*axis_scale, gt_rot[1, 0]*axis_scale, gt_rot[2, 0]*axis_scale, 
+                                  color='r')
+            gt_y_arrow = ax.quiver(gt_pos[0], gt_pos[1], gt_pos[2], 
+                                  gt_rot[0, 1]*axis_scale, gt_rot[1, 1]*axis_scale, gt_rot[2, 1]*axis_scale, 
+                                  color='g')
+            gt_z_arrow = ax.quiver(gt_pos[0], gt_pos[1], gt_pos[2], 
+                                  gt_rot[0, 2]*axis_scale, gt_rot[1, 2]*axis_scale, gt_rot[2, 2]*axis_scale, 
+                                  color='b')
+            gt_axes = [gt_x_arrow, gt_y_arrow, gt_z_arrow]
+            
+            est_pos = estimated_positions[i]
+            est_rot = estimated_rotations[i]
+            est_center_plot.set_data([est_pos[0]], [est_pos[1]])
+            est_center_plot.set_3d_properties([est_pos[2]])
+            
+            # Generate and plot estimated needle arc
+            est_needle_arc = self.generate_needle_arc(est_pos, est_rot)
+            est_needle_plot.set_data(est_needle_arc[:, 0], est_needle_arc[:, 1])
+            est_needle_plot.set_3d_properties(est_needle_arc[:, 2])
+            
+            if est_axes is not None:
+                for artist in est_axes:
+                    if artist:
+                        try:
+                            artist.remove()
+                        except:
+                            pass
+            
+            est_x_arrow = ax.quiver(est_pos[0], est_pos[1], est_pos[2], 
+                                   est_rot[0, 0]*axis_scale, est_rot[1, 0]*axis_scale, est_rot[2, 0]*axis_scale, 
+                                   color='r', linestyle='--')
+            est_y_arrow = ax.quiver(est_pos[0], est_pos[1], est_pos[2], 
+                                   est_rot[0, 1]*axis_scale, est_rot[1, 1]*axis_scale, est_rot[2, 1]*axis_scale, 
+                                   color='g', linestyle='--')
+            est_z_arrow = ax.quiver(est_pos[0], est_pos[1], est_pos[2], 
+                                   est_rot[0, 2]*axis_scale, est_rot[1, 2]*axis_scale, est_rot[2, 2]*axis_scale, 
+                                   color='b', linestyle='--')
+            est_axes = [est_x_arrow, est_y_arrow, est_z_arrow]
+            
+            gt_traj = np.array([pose[0] for pose in ground_truth_poses[:i+1]])
+            gt_traj_plot.set_data(gt_traj[:, 0], gt_traj[:, 1])
+            gt_traj_plot.set_3d_properties(gt_traj[:, 2])
+            
+            est_traj = estimated_positions[:i+1]
+            est_traj_plot.set_data(est_traj[:, 0], est_traj[:, 1])
+            est_traj_plot.set_3d_properties(est_traj[:, 2])
+            
+            pos_error = np.linalg.norm(gt_pos - est_pos)
+            rot_error_matrix = np.abs(gt_rot - est_rot)
+            rot_error = np.rad2deg(np.linalg.norm(rot_error_matrix, 'fro') / (2 * np.sqrt(2)))
+            
+            frame_text.set_text(f'Frame: {i}\nPosition Error: {pos_error:.2f}mm\nOrientation Error: {rot_error:.2f}°')
+            
+            return (points_plot, gt_center_plot, est_center_plot, gt_traj_plot, est_traj_plot, 
+                   gt_needle_plot, est_needle_plot, frame_text)
+        
+        try:
+            num_frames = len(trajectories) // self.frame_stride
+            if num_frames <= 0:
+                num_frames = 1
+                
+            ani = FuncAnimation(fig, update, frames=num_frames, init_func=init, blit=False, interval=50)
+            try:
+                ani.save('needle_tracking.mp4', writer='ffmpeg', fps=20, dpi=100)
+                print("Animation saved as 'needle_tracking.mp4'")
+            except:
+                print("ffmpeg not available. Attempting to save with pillow...")
+                ani.save('needle_tracking.gif', writer='pillow', fps=10, dpi=80)
+                print("Animation saved as 'needle_tracking.gif'")
+        except Exception as e:
+            print(f"Error creating animation: {e}")
+        
+        plt.close(fig)
 
 
 def main():
-    config = load_config("/home/imad/SurgicalToolsPose/Scripts/RobustNeedlePose/config.yaml")
-    estimator_config = {
-        'aspect_ratio': config['FitzgibbonEllipseFitter']['aspect_ratio'],
-        'surgical_constraints': config['surgical_constraints'],
-        'ransac_params': config['RobustPlaneFitter'],
-        'ellipse_method': config['FitzgibbonEllipseFitter']['method'],
-        'kalman_config': config['AdaptiveKalmanFiltering']
-    }
+    cfg_path = 'Scripts/RobustNeedlePose/config.yaml'
+    try:
+        cfg = read_config(cfg_path)
+    except FileNotFoundError:
+        print(f"Config file not found at {cfg_path}.")
+        return
     
-    generator = SyntheticNeedleDataGenerator(config)
+    print("Config loaded from: ", cfg_path)
+    
+    sim = SyntheticDataGeneration(cfg)
+    
+    print("Generating synthetic needle points...")
+    points = sim.generate_points()
+    print(f"Generated {len(points)} points")
+    
+    print("Generating trajectory...")
+    trajectories, ground_truth_poses, times = sim.generate_trajectory(points)
+    print(f"Generated trajectory with {len(trajectories)} frames")
+    
+    print("Running pose estimator on trajectory...")
+    estimated_positions, estimated_rotations, metrics_list, time_list = sim.run_solver(trajectories, times)
+    sim.metrics_list = metrics_list 
+    
+    pos_errors = [np.linalg.norm(gt_pos - est_pos) for (gt_pos, _), est_pos in zip(ground_truth_poses, estimated_positions)]
+    mean_pos_error = np.mean(pos_errors)
+    max_pos_error = np.max(pos_errors)
+    
+    rot_errors = []
+    for (_, gt_rot), est_rot in zip(ground_truth_poses, estimated_rotations):
+        rot_error_matrix = np.abs(gt_rot - est_rot)
+        rot_error = np.rad2deg(np.linalg.norm(rot_error_matrix, 'fro') / (2 * np.sqrt(2)))
+        rot_errors.append(rot_error)
+    
+    mean_rot_error = np.mean(rot_errors)
+    max_rot_error = np.max(rot_errors)
+    
+    print("\nPose Estimation Results:")
+    print(f"Mean Position Error: {mean_pos_error:.3f}mm")
+    print(f"Max Position Error: {max_pos_error:.3f}mm")
+    print(f"Mean Orientation Error: {mean_rot_error:.3f}°")
+    print(f"Max Orientation Error: {max_rot_error:.3f}°")
+    
+    sim.visualize_results(trajectories, ground_truth_poses, estimated_positions, estimated_rotations, time_list, times)
 
-    # Generate trajectory (10 seconds at 30Hz)
-    print("Generating synthetic needle trajectory...")
-    trajectory = generator.generate_trajectory()
-    
-    vis_config = config['SyntheticNeedleSimulation']['visualization']
-    print("Running tracking simulation...")
-    summary = generator.run_tracking_simulation(
-        trajectory=trajectory,
-        visualize=vis_config['enabled'],
-        save_animation=vis_config['save_animation']
-    )
-    
-    # Print summary statistics
-    print("\nTracking Performance Summary:")
-    print(f"Mean Position Error: {summary['mean_position_error']:.2f} mm")
-    print(f"Max Position Error: {summary['max_position_error']:.2f} mm")
-    print(f"Mean Orientation Error: {summary['mean_orientation_error']:.2f} degrees")
-    print(f"Max Orientation Error: {summary['max_orientation_error']:.2f} degrees")
-    print(f"Mean Processing Time: {summary['mean_processing_time']*1000:.2f} ms")
-    
-    # Plot trajectory comparison
-    generator.plot_trajectory_comparison()
-    
-    # Plot error histograms
-    generator.plot_error_histograms()
 
 if __name__ == "__main__":
     main()

@@ -11,26 +11,7 @@ from MainPipeline import RobustPlaneFitter, FitzgibbonEllipseFitter, AdaptiveKal
 
 
 class EnhancedEllipsePoseEstimator:
-    """
-    Enhanced ellipse pose estimator for surgical needle tracking.
-    
-    This class improves upon the original EllipsePoseEstimator by incorporating:
-    1. RANSAC-based plane fitting with PROSAC variant
-    2. Fitzgibbon's direct least squares ellipse fitting
-    3. Adaptive Kalman filtering for temporal consistency
-    
-    The implementation is optimized for surgical needle tracking in stereo
-    endoscopic imagery, with special attention to numerical stability,
-    outlier rejection, and temporal consistency.
-    
-    References:
-        [1] Fitzgibbon, A., et al. (1999). Direct least square fitting of ellipses.
-            IEEE Transactions on PAMI, 21(5), 476-480.
-        [2] Chum, O., & Matas, J. (2005). Matching with PROSAC-progressive sample consensus.
-            In IEEE CVPR.
-        [3] Haase, S., et al. (2013). Stereo tracking of surgical instruments.
-            In Medical Imaging: Image-Guided Procedures.
-    
+    """    
     Attributes:
         aspect_ratio (float): Expected aspect ratio of the ellipse.
         plane_fitter (RobustPlaneFitter): RANSAC-based plane fitting object.
@@ -47,9 +28,7 @@ class EnhancedEllipsePoseEstimator:
                  ransac_params: Optional[dict] = None,
                  ellipse_method: str = 'fitzgibbon_hybrid',
                  kalman_config: Optional[dict] = None):
-        """
-        Initialize the enhanced ellipse pose estimator.
-        
+        """        
         Args:
             aspect_ratio: Expected aspect ratio of the ellipse (a/b).
             surgical_constraints: Dictionary of surgical needle constraints.
@@ -70,7 +49,7 @@ class EnhancedEllipsePoseEstimator:
         }
         ransac_params = {**ransac_default, **(ransac_params or {})}
         
-        # Initialize plane fitter
+        # plane fitter
         self.plane_fitter = RobustPlaneFitter(
             max_trials=ransac_params['max_trials'],
             residual_threshold=ransac_params['residual_threshold'],
@@ -79,18 +58,18 @@ class EnhancedEllipsePoseEstimator:
             temporal_persistence=ransac_params['temporal_persistence']
         )
         
-        # Initialize ellipse fitter
+        # ellipse fitter
         self.ellipse_fitter = FitzgibbonEllipseFitter(
             aspect_ratio=aspect_ratio,
             method=ellipse_method
         )
         
-        # Initialize Kalman filter
+        # Kalman filter
         self.kalman_filter = AdaptiveKalmanFilter(
             **(kalman_config or {})
         )
         
-        # Initialize validation metrics
+        # validation metrics
         self.validation_metrics = {
             'reproj_error': [],
             'plane_consistency': [],
@@ -104,18 +83,7 @@ class EnhancedEllipsePoseEstimator:
                          points: np.ndarray, 
                          centroid: np.ndarray, 
                          plane_basis: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Project 3D points onto the fitted plane.
-        
-        Args:
-            points: 3D point cloud of shape (n, 3).
-            centroid: 3D point representing the centroid of the plane.
-            plane_basis: 2x3 array containing two orthogonal basis vectors of the plane.
-            
-        Returns:
-            tuple: (u, v) Projected 2D coordinates in the plane.
-            
-        Notes:
+        """            
             The projection is performed by subtracting the centroid and computing
             the dot product with each basis vector of the plane.
             
@@ -123,10 +91,8 @@ class EnhancedEllipsePoseEstimator:
             from points to the plane. For inlier points (within residual_threshold),
             the projection error is typically less than 0.5mm.
         """
-        # Center the points
         centered = points - centroid
         
-        # Project onto the plane basis
         u = np.dot(centered, plane_basis[0])
         v = np.dot(centered, plane_basis[1])
         
@@ -137,18 +103,7 @@ class EnhancedEllipsePoseEstimator:
                                    ellipse_center: np.ndarray, 
                                    rot_mat: np.ndarray,
                                    ellipse_params: np.ndarray) -> float:
-        """
-        Compute reprojection error between points and the fitted ellipse.
-        
-        Args:
-            points: 3D point cloud of shape (n, 3).
-            ellipse_center: 3D center of the fitted ellipse.
-            rot_mat: 3x3 rotation matrix of the ellipse.
-            ellipse_params: Parameters of the fitted ellipse [u_c, v_c, a, b, theta].
-            
-        Returns:
-            Mean reprojection error in mm.
-            
+        """            
         Notes:
             The reprojection error is computed as the geometric distance from each
             point to the ellipse surface in 3D space. This is a more accurate
@@ -156,48 +111,32 @@ class EnhancedEllipsePoseEstimator:
         """
         n_points = points.shape[0]
         
-        # Extract ellipse parameters
         _, _, a, b, _ = ellipse_params
         
-        # Create a canonical ellipse in the XY plane
         theta = np.linspace(0, 2*np.pi, 100)
         canonical_ellipse = np.zeros((100, 3))
         canonical_ellipse[:, 0] = a * np.cos(theta)
         canonical_ellipse[:, 1] = b * np.sin(theta)
         
-        # Transform canonical ellipse to 3D using rotation matrix and ellipse center
         ellipse_3d = np.dot(canonical_ellipse, rot_mat.T) + ellipse_center
         
-        # Compute distance from each point to the closest point on the ellipse
         errors = np.zeros(n_points)
         for i, point in enumerate(points):
-            # Compute distances to all points on the ellipse
             distances = np.linalg.norm(ellipse_3d - point, axis=1)
-            # Take the minimum distance
             errors[i] = np.min(distances)
         
-        # Return mean error
         return np.mean(errors)
     
     def _verify_pose_consistency(self, 
                                ellipse_center: np.ndarray, 
                                rot_mat: np.ndarray) -> bool:
-        """
-        Verify the consistency of the estimated pose with physical constraints.
-        
-        Args:
-            ellipse_center: 3D center of the fitted ellipse.
-            rot_mat: 3x3 rotation matrix of the ellipse.
-            
-        Returns:
-            True if the pose is consistent with constraints, False otherwise.
-            
-        Notes:
-            This function verifies that:
+        """      
+        This function verifies that:
             1. The ellipse center is within the expected workspace
             2. The orientation is consistent with anatomical constraints
             3. The pose is consistent with previous estimates (if available)
         """
+
         # Check if ellipse center is within workspace limits
         if 'max_translation_mm' in self.surgical_constraints:
             limits = self.surgical_constraints['max_translation_mm']
@@ -207,27 +146,22 @@ class EnhancedEllipsePoseEstimator:
                 return False
         
         # Check if orientation is within anatomical limits
-        # Extract Euler angles from rotation matrix
         yaw, pitch, roll = self.kalman_filter._rotation_matrix_to_euler(rot_mat)
         
         if 'max_rotation_deg' in self.surgical_constraints:
             limits_deg = self.surgical_constraints['max_rotation_deg']
-            # Convert to radians
             limits_rad = np.deg2rad(limits_deg)
             
-            # Check each angle (accounting for periodic angles)
-            # For yaw and roll, only check range if less than 360 degrees
             if limits_deg[0] < 360 and np.abs(yaw) > limits_rad[0]/2:
                 return False
             
-            # Pitch is always limited (can't go through patient)
+            # Pitch is always limited (can't go through workspace)
             if np.abs(pitch) > limits_rad[1]/2:
                 return False
             
             if limits_deg[2] < 360 and np.abs(roll) > limits_rad[2]/2:
                 return False
         
-        # Check consistency with previous estimate if Kalman filter is initialized
         if self.kalman_filter.initialized:
             prev_pos = self.kalman_filter.get_position()
             prev_rot = self.kalman_filter.get_rotation_matrix()
@@ -239,7 +173,7 @@ class EnhancedEllipsePoseEstimator:
             
             # Check orientation difference (using Frobenius norm)
             rot_diff = np.linalg.norm(rot_mat - prev_rot, 'fro')
-            if rot_diff > 1.0:  # Approximately 30 degrees maximum rotation
+            if rot_diff > 1.0:  # 30 degrees maximum rotation
                 return False
         
         return True
@@ -259,33 +193,20 @@ class EnhancedEllipsePoseEstimator:
                 position (numpy.ndarray): 3D position of the ellipse center.
                 orientation (numpy.ndarray): 3x3 rotation matrix.
                 metrics (dict): Dictionary of validation metrics.
-                
-        Notes:
-            This method implements the full pipeline:
-            1. Robust plane fitting using RANSAC with PROSAC variant
-            2. Ellipse fitting using Fitzgibbon's direct least squares method
-            3. Temporal filtering using an adaptive Kalman filter
-            
-            The implementation is optimized for real-time performance and robust
-            to outliers and partial occlusions common in surgical scenes.
-            
-            Error propagation:
-            - Position accuracy: ~1-2mm (primarily limited by stereo reconstruction)
-            - Orientation accuracy: ~3-5 degrees (primarily limited by ellipse fitting)
-            
-            IEEE-quality validation is performed at each step to ensure the
-            reliability of the estimates.
+
+        Error propagation:
+        - Position accuracy: ~1-2mm (primarily limited by stereo reconstruction)
+        - Orientation accuracy: ~3-5 degrees (primarily limited by ellipse fitting)
         """
         start_time = time.time()
         
-        # Set timestamp if not provided
         if timestamp is None:
             timestamp = time.time()
         
         if self.last_timestamp is None:
             self.last_timestamp = timestamp
         
-        # Step 1: Robust plane fitting using RANSAC with PROSAC variant
+        # Step 1: plane fitting
         centroid, normal, plane_basis = self.plane_fitter.fit(
             points, self.surgical_constraints)
         
@@ -300,14 +221,9 @@ class EnhancedEllipsePoseEstimator:
             ellipse_params, normal, self.surgical_constraints)
         
         # Step 4: Compute 3D pose from ellipse parameters
-        # Extract ellipse center in plane coordinates
         u_c, v_c, a, b, theta = ellipse_params
-        
-        # Map ellipse center back to 3D
         ellipse_center_3d = centroid + u_c * plane_basis[0] + v_c * plane_basis[1]
         
-        # Compute rotation matrix from plane basis and ellipse orientation
-        # First, create rotation matrix for the plane
         rot_z = np.zeros((3, 3))
         rot_z[:, 0] = plane_basis[0]
         rot_z[:, 1] = plane_basis[1]
@@ -328,14 +244,14 @@ class EnhancedEllipsePoseEstimator:
         # Final rotation matrix
         rot_mat = rot_z @ in_plane_rot
         
-        # Step 5: Validate the estimated pose
+        # Step 5: Validation
         reprojection_error = self._compute_reprojection_error(
             points, ellipse_center_3d, rot_mat, ellipse_params)
         
         pose_consistent = self._verify_pose_consistency(
             ellipse_center_3d, rot_mat)
         
-        # Step 6: Apply Kalman filtering for temporal consistency
+        # Step 6: Apply Kalman filtering
         dt = timestamp - self.last_timestamp
         self.last_timestamp = timestamp
         
@@ -358,13 +274,12 @@ class EnhancedEllipsePoseEstimator:
         filtered_position = self.kalman_filter.get_position()
         filtered_rotation = self.kalman_filter.get_rotation_matrix()
         
-        # Update validation metrics
+        # Update metrics
         self.validation_metrics['reproj_error'].append(reprojection_error)
         self.validation_metrics['plane_consistency'].append(True)  # From plane fitter
         self.validation_metrics['ellipse_consistency'].append(ellipse_consistent)
         self.validation_metrics['processing_time'].append(time.time() - start_time)
         
-        # Prepare metrics dictionary for return
         metrics = {
             'reprojection_error': reprojection_error,
             'ellipse_params': ellipse_params,

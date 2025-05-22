@@ -303,6 +303,7 @@ class RobustPlaneFitter:
         
         if best_normal is None:
             # Fallback to PCA if RANSAC fails
+            print("Falling back to RANSAC cos PCA failed")
             pca = PCA(n_components=3)
             pca.fit(points)
             best_normal = pca.components_[-1]
